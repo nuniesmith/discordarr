@@ -120,7 +120,7 @@ class LidarrClientTests(unittest.TestCase):
 
     def test_add_artist_posts_to_the_v1_artist_endpoint(self) -> None:
         client = LidarrClient("http://lidarr.invalid", "key123")
-        opener = _wire(client, body={"id": 402})
+        opener = _wire(client, body={"id": 31})
         client.add_artist({"foreignArtistId": "abc", "artistName": "Some Band"})
         [request] = opener.requests
         self.assertEqual(request.get_method(), "POST")
@@ -129,10 +129,10 @@ class LidarrClientTests(unittest.TestCase):
     def test_albums_filters_by_artist_id(self) -> None:
         client = LidarrClient("http://lidarr.invalid", "key123")
         opener = _wire(client, body=[])
-        client.albums(402)
+        client.albums(31)
         [request] = opener.requests
         self.assertTrue(request.full_url.startswith("http://lidarr.invalid/api/v1/album?"))
-        self.assertIn("artistId=402", request.full_url)
+        self.assertIn("artistId=31", request.full_url)
 
     def test_set_album_monitored_puts_the_exact_documented_body(self) -> None:
         """PUT /api/v1/album/monitor {albumIds:[id], monitored:true} -- the

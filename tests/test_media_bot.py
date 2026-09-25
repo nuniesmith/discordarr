@@ -283,7 +283,7 @@ class MovieStateTests(unittest.TestCase):
         self.assertEqual(_movie_state({"title": "New Movie"}), "none")
 
     def test_in_library_with_a_file_is_have(self) -> None:
-        self.assertEqual(_movie_state({"id": 131, "movieFileId": 244}), "have")
+        self.assertEqual(_movie_state({"id": 7, "movieFileId": 70}), "have")
 
     def test_in_library_with_no_file_yet_is_requested(self) -> None:
         self.assertEqual(_movie_state({"id": 186, "movieFileId": 0}), "requested")
@@ -291,7 +291,7 @@ class MovieStateTests(unittest.TestCase):
     def test_a_present_movie_file_object_also_counts_as_have(self) -> None:
         """Defensive: `movieFileId` and `movieFile` are checked with `or`,
         since either one being truthy is sufficient."""
-        self.assertEqual(_movie_state({"id": 131, "movieFileId": 0, "movieFile": {"id": 5}}), "have")
+        self.assertEqual(_movie_state({"id": 7, "movieFileId": 0, "movieFile": {"id": 5}}), "have")
 
 
 class MovieLabelTests(unittest.TestCase):
@@ -327,18 +327,18 @@ class ShowStateTests(unittest.TestCase):
         self.assertEqual(_show_state({"title": "New Show"}), "none")
 
     def test_in_library_with_a_downloaded_episode_is_have(self) -> None:
-        self.assertEqual(_show_state({"id": 90, "statistics": {"episodeFileCount": 12}}), "have")
+        self.assertEqual(_show_state({"id": 12, "statistics": {"episodeFileCount": 12}}), "have")
 
     def test_in_library_with_no_downloaded_episodes_is_requested(self) -> None:
-        self.assertEqual(_show_state({"id": 90, "statistics": {"episodeFileCount": 0}}), "requested")
+        self.assertEqual(_show_state({"id": 12, "statistics": {"episodeFileCount": 0}}), "requested")
 
     def test_missing_statistics_is_requested_not_have(self) -> None:
-        self.assertEqual(_show_state({"id": 90}), "requested")
+        self.assertEqual(_show_state({"id": 12}), "requested")
 
 
 class ShowLabelTests(unittest.TestCase):
     def test_have_gets_a_checkmark(self) -> None:
-        label = _show_label({"id": 1, "title": "The Office", "statistics": {"episodeFileCount": 5}}, {})
+        label = _show_label({"id": 1, "title": "Night Shift Diner", "statistics": {"episodeFileCount": 5}}, {})
         self.assertTrue(label.startswith("✅"))
 
 
@@ -355,7 +355,7 @@ class IsBigShowTests(unittest.TestCase):
         self.assertFalse(_is_big_show({"statistics": {"seasonCount": 3}}, 5, 100))
 
     def test_more_than_the_season_threshold_needs_confirmation(self) -> None:
-        # NCIS, verified read-only: seasonCount 24 (real).
+        # A long-running procedural: 24 seasons, the shape a real lookup returns.
         self.assertTrue(_is_big_show({"statistics": {"seasonCount": 24}}, 5, 100))
 
     def test_exactly_at_the_season_threshold_needs_no_confirmation(self) -> None:
@@ -415,10 +415,10 @@ class AlbumArtistIdTests(unittest.TestCase):
     since it is the same value in that response."""
 
     def test_top_level_artist_id_is_used(self) -> None:
-        self.assertEqual(_album_artist_id({"artistId": 402}), 402)
+        self.assertEqual(_album_artist_id({"artistId": 31}), 31)
 
     def test_falls_back_to_the_embedded_artist_id(self) -> None:
-        self.assertEqual(_album_artist_id({"artistId": 0, "artist": {"id": 402}}), 402)
+        self.assertEqual(_album_artist_id({"artistId": 0, "artist": {"id": 31}}), 31)
 
     def test_no_artist_id_anywhere_is_none(self) -> None:
         self.assertIsNone(_album_artist_id({"artistId": 0, "artist": {"id": 0}}))
@@ -631,7 +631,7 @@ class AddMovieTests(unittest.IsolatedAsyncioTestCase):
         client = _FakeRadarr()
         interaction = _FakeInteraction()
         await _add_movie(
-            interaction, {"id": 131, "title": "Toy Story", "movieFileId": 244}, client=client, setup=_setup(), limiter=AddRateLimiterStub()
+            interaction, {"id": 7, "title": "The Paper Lantern", "movieFileId": 70}, client=client, setup=_setup(), limiter=AddRateLimiterStub()
         )
         self.assertEqual(client.add_calls, [], "an already-owned movie must not be re-added")
         [(content, _kwargs)] = interaction.followup.sent
@@ -678,6 +678,21 @@ class AddMovieTests(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 
 
+    async def test_pressing_an_owned_movie_spends_no_add(self) -> None:
+        """The budget is for adds actually attempted. With room for exactly
+        one add, a press on something already in the library (a stale button)
+        must leave that one add available for a real request."""
+        client = _FakeRadarr()
+        limiter = AddRateLimiter(1, 3600.0)
+        owned = _FakeInteraction()
+        await _add_movie(owned, {"id": 7, "title": "The Paper Lantern", "movieFileId": 70}, client=client, setup=_setup(), limiter=limiter)
+        fresh = _FakeInteraction()
+        await _add_movie(fresh, {"title": "Some Movie", "tmdbId": 5}, client=client, setup=_setup(), limiter=limiter)
+        self.assertEqual([c["title"] for c in client.add_calls], ["Some Movie"])
+        [(content, _kwargs)] = fresh.followup.sent
+        self.assertIn("Requested", content)
+
+
 class AddShowTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_new_small_show_is_requested_directly(self) -> None:
         client = _FakeSonarr()
@@ -696,7 +711,7 @@ class AddShowTests(unittest.IsolatedAsyncioTestCase):
         client = _FakeSonarr()
         interaction = _FakeInteraction()
         await _add_show(
-            interaction, {"id": 90, "title": "The Office", "statistics": {"episodeFileCount": 5}}, client=client, setup=_setup(), limiter=AddRateLimiterStub()
+            interaction, {"id": 12, "title": "Night Shift Diner", "statistics": {"episodeFileCount": 5}}, client=client, setup=_setup(), limiter=AddRateLimiterStub()
         )
         self.assertEqual(client.add_calls, [])
 
@@ -706,7 +721,7 @@ class AddShowTests(unittest.IsolatedAsyncioTestCase):
         interaction = _FakeInteraction()
         await _request_show(
             interaction,
-            {"title": "NCIS", "statistics": {"seasonCount": 24}},
+            {"title": "Harbor Precinct", "statistics": {"seasonCount": 24}},
             client=client,
             setup=_setup(),
             limiter=AddRateLimiterStub(),
@@ -736,7 +751,7 @@ class AddShowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_confirming_adds_the_show(self) -> None:
         client = _FakeSonarr()
-        show = {"title": "NCIS", "statistics": {"seasonCount": 24}}
+        show = {"title": "Harbor Precinct", "statistics": {"seasonCount": 24}}
         add_fn = functools.partial(_add_show, client=client, setup=_setup(), limiter=AddRateLimiterStub())
         view = _ConfirmAddShowView(show, _allow, add_fn)
         interaction = _FakeInteraction()
@@ -748,7 +763,7 @@ class AddShowTests(unittest.IsolatedAsyncioTestCase):
         opened the dialog -- same reasoning as discord_bot.py's
         _ConfirmGrabView.confirm."""
         client = _FakeSonarr()
-        show = {"title": "NCIS", "statistics": {"seasonCount": 24}}
+        show = {"title": "Harbor Precinct", "statistics": {"seasonCount": 24}}
         add_fn = functools.partial(_add_show, client=client, setup=_setup(), limiter=AddRateLimiterStub())
         view = _ConfirmAddShowView(show, _deny, add_fn)
         interaction = _FakeInteraction()
@@ -757,7 +772,7 @@ class AddShowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_adds_nothing(self) -> None:
         client = _FakeSonarr()
-        show = {"title": "NCIS", "statistics": {"seasonCount": 24}}
+        show = {"title": "Harbor Precinct", "statistics": {"seasonCount": 24}}
         add_fn = functools.partial(_add_show, client=client, setup=_setup(), limiter=AddRateLimiterStub())
         view = _ConfirmAddShowView(show, _allow, add_fn)
         interaction = _FakeInteraction()
@@ -775,16 +790,16 @@ class AddShowTests(unittest.IsolatedAsyncioTestCase):
 
 class AddAlbumTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_album_for_an_existing_artist_is_requested_directly(self) -> None:
-        client = _FakeLidarr(albums_by_artist={402: [{"id": 42620, "foreignAlbumId": "abc-1"}]})
-        album = {"title": "Astral Rejection", "foreignAlbumId": "abc-1", "artistId": 402, "artist": {"artistName": "Some Band"}}
+        client = _FakeLidarr(albums_by_artist={31: [{"id": 3100, "foreignAlbumId": "abc-1"}]})
+        album = {"title": "Glass Harbor", "foreignAlbumId": "abc-1", "artistId": 31, "artist": {"artistName": "Some Band"}}
         interaction = _FakeInteraction()
         await _add_album(interaction, album, client=client, setup=_setup(), limiter=AddRateLimiterStub(), poll_attempts=3, poll_seconds=0)
         self.assertEqual(client.add_artist_calls, [], "the artist already exists -- nothing to add")
-        self.assertEqual(client.monitor_calls, [(42620, True)])
-        self.assertEqual(client.search_calls, [42620])
+        self.assertEqual(client.monitor_calls, [(3100, True)])
+        self.assertEqual(client.search_calls, [3100])
         [(content, _kwargs)] = interaction.followup.sent
         self.assertIn("Requested", content)
-        self.assertIn("Astral Rejection", content)
+        self.assertIn("Glass Harbor", content)
         self.assertIn("Some Band", content)
 
     async def test_a_new_artist_is_added_then_the_album_is_found_and_requested(self) -> None:
@@ -824,7 +839,7 @@ class AddAlbumTests(unittest.IsolatedAsyncioTestCase):
         client = _FakeLidarr()
         interaction = _FakeInteraction()
         await _add_album(
-            interaction, {"title": "X", "monitored": True, "artistId": 402}, client=client, setup=_setup(), limiter=AddRateLimiterStub(), poll_attempts=1, poll_seconds=0
+            interaction, {"title": "X", "monitored": True, "artistId": 31}, client=client, setup=_setup(), limiter=AddRateLimiterStub(), poll_attempts=1, poll_seconds=0
         )
         self.assertEqual(client.add_artist_calls, [])
         self.assertEqual(client.monitor_calls, [])
@@ -850,6 +865,24 @@ class AddAlbumTests(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 # _RequestView (shared by /movie, /show, /music)
 # ---------------------------------------------------------------------------
+
+
+    async def test_an_existing_artist_without_that_album_says_why_and_adds_nothing(self) -> None:
+        """The artist is already in Lidarr but its catalog there lacks the
+        album -- typically a release type the metadata profile skips. Waiting
+        will not change that, so the reply must not claim an artist was just
+        added or suggest trying again in a minute."""
+        client = _FakeLidarr(albums_by_artist={31: [{"id": 3100, "foreignAlbumId": "other"}]})
+        album = {"title": "A Live Single", "foreignAlbumId": "missing-1", "artistId": 31, "artist": {"artistName": "Some Band"}}
+        interaction = _FakeInteraction()
+        await _add_album(interaction, album, client=client, setup=_setup(), limiter=AddRateLimiterStub(), poll_attempts=2, poll_seconds=0)
+        self.assertEqual(client.add_artist_calls, [])
+        self.assertEqual(client.monitor_calls, [])
+        self.assertEqual(client.search_calls, [])
+        [(content, _kwargs)] = interaction.followup.sent
+        self.assertIn("already in Lidarr", content)
+        self.assertIn("release type", content)
+        self.assertNotIn("Added", content)
 
 
 class RequestViewTests(unittest.IsolatedAsyncioTestCase):

@@ -162,10 +162,6 @@ async def _add_movie(
     limiter: AddRateLimiter,
 ) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
-    wait = limiter.try_consume(_actor(interaction))
-    if wait is not None:
-        await interaction.followup.send(rate_limit_message("adds", wait), ephemeral=True)
-        return
     # Re-checked against the same state used to decide the button's enabled
     # state, not trusted from it -- the same defence ReleaseView/EbookView
     # use against a stale client-side press reaching an action its slot was
@@ -179,6 +175,13 @@ async def _add_movie(
     error = await setup.ensure()
     if error:
         await interaction.followup.send(f"Radarr isn't fully set up here: {error}", ephemeral=True)
+        return
+    # The budget is spent only on an add actually attempted: a press that
+    # turns out to be already-in-the-library, or a service not set up, adds
+    # nothing and must not use up one of the person's adds for the hour.
+    wait = limiter.try_consume(_actor(interaction))
+    if wait is not None:
+        await interaction.followup.send(rate_limit_message("adds", wait), ephemeral=True)
         return
     payload = {
         **movie,
@@ -315,10 +318,6 @@ async def _add_show(
     discord_bot.py's `_queue_grab` is shared by ReleaseView's immediate press
     and `_ConfirmGrabView`'s confirmed one."""
     await interaction.response.defer(ephemeral=True, thinking=True)
-    wait = limiter.try_consume(_actor(interaction))
-    if wait is not None:
-        await interaction.followup.send(rate_limit_message("adds", wait), ephemeral=True)
-        return
     if _show_state(show) != "none":
         await interaction.followup.send(
             f"**{show.get('title') or 'That show'}** is already in the library. Nothing was added.",
@@ -328,6 +327,13 @@ async def _add_show(
     error = await setup.ensure()
     if error:
         await interaction.followup.send(f"Sonarr isn't fully set up here: {error}", ephemeral=True)
+        return
+    # The budget is spent only on an add actually attempted: a press that
+    # turns out to be already-in-the-library, or a service not set up, adds
+    # nothing and must not use up one of the person's adds for the hour.
+    wait = limiter.try_consume(_actor(interaction))
+    if wait is not None:
+        await interaction.followup.send(rate_limit_message("adds", wait), ephemeral=True)
         return
     payload = {
         **show,
@@ -376,7 +382,7 @@ async def _request_show(
         )
         add_fn = functools.partial(_add_show, client=client, setup=setup, limiter=limiter)
         await interaction.response.send_message(
-            f"**{show.get('title') or 'That show'}** has {season_text} -- at or above the "
+            f"**{show.get('title') or 'That show'}** has {season_text} -- over the "
             f"{season_threshold}-season confirmation threshold. A mis-ranked or simply huge "
             "show is one press away from every episode of it queuing at once. Confirm to "
             "request all of it anyway.",
@@ -473,10 +479,6 @@ async def _add_album(
     poll_seconds: float,
 ) -> None:
     await interaction.response.defer(ephemeral=True, thinking=True)
-    wait = limiter.try_consume(_actor(interaction))
-    if wait is not None:
-        await interaction.followup.send(rate_limit_message("adds", wait), ephemeral=True)
-        return
     if _album_state(album) != "none":
         await interaction.followup.send(
             f"**{album.get('title') or 'That album'}** is already requested. Nothing was added.",
@@ -487,10 +489,18 @@ async def _add_album(
     if error:
         await interaction.followup.send(f"Lidarr isn't fully set up here: {error}", ephemeral=True)
         return
+    # The budget is spent only on an add actually attempted: a press that
+    # turns out to be already-in-the-library, or a service not set up, adds
+    # nothing and must not use up one of the person's adds for the hour.
+    wait = limiter.try_consume(_actor(interaction))
+    if wait is not None:
+        await interaction.followup.send(rate_limit_message("adds", wait), ephemeral=True)
+        return
     title = str(album.get("title") or "that album")
     artist_name = _album_artist_name(album)
     foreign_album_id = album.get("foreignAlbumId")
     artist_id = _album_artist_id(album)
+    artist_was_added = artist_id is None
 
     if artist_id is None:
         artist = album.get("artist")
@@ -530,12 +540,22 @@ async def _add_album(
 
     local_album_id = await _find_local_album(client, artist_id, foreign_album_id, poll_attempts, poll_seconds)
     if local_album_id is None:
-        await interaction.followup.send(
-            f"Added **{artist_name}** to Lidarr, but **{title}** hasn't shown up in its catalog "
-            "yet -- Lidarr refreshes a new artist's albums in the background. Try `/music` again "
-            "in a minute to request it.",
-            ephemeral=True,
-        )
+        if artist_was_added:
+            message = (
+                f"Added **{artist_name}** to Lidarr, but **{title}** hasn't shown up in its catalog "
+                "yet -- Lidarr refreshes a new artist's albums in the background. Try `/music` again "
+                "in a minute to request it."
+            )
+        else:
+            # The artist was already there, so waiting will not change this:
+            # Lidarr's metadata profile decides which release types it lists
+            # (the default skips singles, live albums and compilations).
+            message = (
+                f"**{artist_name}** is already in Lidarr, but its catalog there doesn't include "
+                f"**{title}** -- likely a release type its metadata profile skips (singles, live "
+                "or compilation albums). Nothing was requested."
+            )
+        await interaction.followup.send(message, ephemeral=True)
         return
     try:
         await asyncio.to_thread(client.set_album_monitored, local_album_id, True)
