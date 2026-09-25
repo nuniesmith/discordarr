@@ -1,0 +1,6 @@
+# Python 3.13+
+# Everything discordarr talks to (Shelfmark's API, Radarr, Sonarr, Lidarr) is
+# plain HTTP over stdlib urllib (see src/discordarr/clients.py) -- the only
+# real dependency is the Discord client itself, pinned to the exact version
+# shelfmark's own bot ran on.
+discord.py==2.5.2
