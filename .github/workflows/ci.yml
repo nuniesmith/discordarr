@@ -76,9 +76,13 @@ jobs:
         with:
           context: .
           push: true
-          # Always resolve the base image afresh: this is what makes the
-          # weekly rebuild pick up a patched python:3.13-slim.
+          # Always resolve the base image afresh, and on the weekly run skip the
+          # layer cache too: the cached pip layer is reused for as long as the
+          # base image is unchanged, which would pin aiohttp and discord.py's
+          # other unpinned dependencies to whatever the cache was first filled
+          # with.
           pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
           # `latest` is what Freddy's Compose tracks. The commit SHA tag is
           # the one to pin to when rolling back, since `latest` moves.
           tags: |
