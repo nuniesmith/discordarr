@@ -1584,7 +1584,7 @@ def build_bot() -> commands.Bot:
 
         async def on_ready(self) -> None:
             if self.user:
-                print(f"Shelfmark bot connected as {self.user} (guild={guild_id or 'global'})")
+                print(f"Bot connected as {self.user} (guild={guild_id or 'global'})")
 
     try:
         allowed_roles = _int_set(os.environ.get("SHELFMARK_DISCORD_ALLOWED_ROLE_IDS"))
