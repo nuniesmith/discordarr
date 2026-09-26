@@ -1,0 +1,100 @@
+name: discordarr CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Compile sources
+        run: python -m compileall -q src tests
+
+  # On a pull request the image is only built, never published -- a PR must
+  # not be able to move a tag that a server pulls.
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --tag discordarr:ci .
+      - name: Console entry point runs
+        run: |
+          docker run --rm discordarr:ci timeout 5 discordarr-bot || test $? -eq 124
+          echo "  ok       discordarr-bot starts and idles without a token"
+
+  # Freddy pulls this image; it has no copy of the source and cannot build it
+  # itself. Without this job the discordarr service there has nothing to
+  # start.
+  publish:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # `latest` is what Freddy's Compose tracks. The commit SHA tag is
+          # the one to pin to when rolling back, since `latest` moves.
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Freddy's Compose tracks `latest`, but nothing told freddy a new one
+      # existed: an image published here reached it only on the next,
+      # unrelated freddy deploy. This asks freddy to roll out exactly this
+      # commit (nuniesmith/freddy update-service.yml), which recreates only
+      # this service and checks it runs this revision (that check is why the
+      # image needs the org.opencontainers.image.revision label above).
+      #
+      # FREDDY_DEPLOY_TOKEN is a fine-grained PAT with Actions: write on
+      # nuniesmith/freddy alone -- GITHUB_TOKEN cannot start a workflow in
+      # another repository. A missing token FAILS this job rather than
+      # skipping: a silent skip is a deploy that never happened, reported as
+      # green.
+      - name: Roll this commit out on freddy
+        env:
+          GH_TOKEN: ${{ secrets.FREDDY_DEPLOY_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::FREDDY_DEPLOY_TOKEN is not set, so freddy keeps running the previous image"
+            exit 1
+          fi
+          gh workflow run update-service.yml --repo nuniesmith/freddy \
+            -f image=ghcr.io/${{ github.repository }} \
+            -f revision=${{ github.sha }} \
+            -f services=discordarr
+          echo "Requested: ${{ github.server_url }}/nuniesmith/freddy/actions/workflows/update-service.yml"
