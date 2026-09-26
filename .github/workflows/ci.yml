@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly, a rebuild on a freshly pulled base image, published and rolled
+  # out like any merge. Without it the image only changes when the code
+  # does, and the Python base and its libraries stop receiving fixes.
+  # Monday 08:17 UTC: clear of the nightly backups and the daily updates.
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -37,6 +44,13 @@ jobs:
         run: |
           docker run --rm discordarr:ci timeout 5 discordarr-bot || test $? -eq 124
           echo "  ok       discordarr-bot starts and idles without a token"
+      # A bot that never connected must NOT pass its own healthcheck.
+      - name: Healthcheck fails without a live bot
+        run: |
+          if docker run --rm discordarr:ci discordarr-healthcheck; then
+            echo "::error::discordarr-healthcheck passed with no bot running"; exit 1
+          fi
+          echo "  ok       discordarr-healthcheck fails when there is no heartbeat"
 
   # Freddy pulls this image; it has no copy of the source and cannot build it
   # itself. Without this job the discordarr service there has nothing to
@@ -44,7 +58,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: write
@@ -62,6 +76,9 @@ jobs:
         with:
           context: .
           push: true
+          # Always resolve the base image afresh: this is what makes the
+          # weekly rebuild pick up a patched python:3.13-slim.
+          pull: true
           # `latest` is what Freddy's Compose tracks. The commit SHA tag is
           # the one to pin to when rolling back, since `latest` moves.
           tags: |

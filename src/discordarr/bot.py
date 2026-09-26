@@ -23,7 +23,7 @@ from collections.abc import MutableMapping
 import discord
 from discord.ext import commands
 
-from . import discord_bot, media_bot
+from . import discord_bot, heartbeat, media_bot
 from .config import Settings
 
 # `discord_bot.py` (ported, unchanged) reads these names directly. Setting a
@@ -68,6 +68,7 @@ def build_bot() -> commands.Bot:
         # just because this second parse is redundant.
         allowed_roles = set()
     media_bot.install_media_commands(bot, settings, allowed_roles)
+    heartbeat.install(bot)
     return bot
 
 

@@ -189,3 +189,19 @@ every push and pull request. On push to `main`, it also publishes
 with the `org.opencontainers.image.revision` label set to that SHA) and
 asks `nuniesmith/freddy` to roll the new image out via its
 `update-service.yml` workflow, the same way Shelfmark's own CI does.
+
+Every Monday (08:17 UTC) CI also rebuilds the image on a freshly pulled
+`python:3.13-slim` and rolls it out the same way, so the base image and its
+libraries keep receiving fixes even when the code has not changed. That
+rebuild reuses the commit's SHA tag, and the bot reconnects once a week when it
+lands.
+
+### Health
+
+The image's `HEALTHCHECK` runs `discordarr-healthcheck`, which passes only
+while the bot keeps touching a heartbeat file (`/tmp/discordarr-heartbeat`,
+every 30 seconds). It touches that file only when it is logged in and hearing
+back from Discord's gateway (`heartbeat.py`). A container whose bot has
+disconnected or stuck turns `unhealthy` within about two minutes, where it used
+to look like any other running container. A bot idling on purpose, with no
+token, reads unhealthy too, because it serves no one.

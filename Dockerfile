@@ -28,4 +28,9 @@ RUN python -m pip install --no-cache-dir --no-deps . \
 USER discordarr
 
 ENTRYPOINT []
+# Healthy only while the bot is connected to Discord: it touches a heartbeat
+# file every 30s while its gateway connection is live (heartbeat.py). A
+# running container with a dead or stuck bot would otherwise look fine.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD ["discordarr-healthcheck"]
 CMD ["discordarr-bot"]
