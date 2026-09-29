@@ -1,5 +1,7 @@
-"""`/movie`, `/show`, `/music` and `/queue` -- the commands discordarr adds on
-top of the ported Shelfmark bot (see discord_bot.py).
+"""`/request` and `/queue` -- the commands discordarr adds on top of the
+ported Shelfmark bot (see discord_bot.py). `/request` is the one command for
+asking for anything new: movies, shows and music are handled here, and
+audiobooks and ebooks by the book half discord_bot.py hands over.
 
 Reuses discord_bot.py's own building blocks rather than re-implementing them:
 `_PagedView` (paging chrome), `_resolve_page_item` (the fix for a button that
@@ -7,7 +9,7 @@ must resolve against the CURRENT page, not the one it was built on -- see
 its docstring), `is_permitted` (the fail-closed role check) and `_actor`
 (the same per-user key used for logging and rate limiting). Everything below
 is new: one generic `_RequestView` for the Request-button row (shared by all
-three add commands, the same way ReleaseView/EbookView/CancelView are three
+three add flows, the same way ReleaseView/EbookView/CancelView are three
 thin subclasses of one base in discord_bot.py), the Radarr/Sonarr/Lidarr
 state functions, and the add flows themselves.
 
@@ -32,7 +34,7 @@ from discord.ext import commands
 from .arr_clients import LidarrClient, RadarrClient, SonarrClient
 from .clients import ServiceError
 from .config import Settings
-from .discord_bot import _PAGE_SIZE, _PagedView, _actor, _resolve_page_item, is_permitted
+from .discord_bot import _PAGE_SIZE, BookRequest, _PagedView, _actor, _resolve_page_item, is_permitted
 from .ratelimit import AddRateLimiter, rate_limit_message
 
 # ---------------------------------------------------------------------------
@@ -71,7 +73,7 @@ def _build_guard(allowed_roles: set[int]) -> Callable[[discord.Interaction], Awa
 
 
 # ---------------------------------------------------------------------------
-# Queue rendering -- shared by /movie, /show's inline progress and /queue.
+# Queue rendering -- shared by movie and show results' inline progress and /queue.
 # ---------------------------------------------------------------------------
 
 
@@ -120,7 +122,7 @@ def _queue_progress_text(record: dict[str, Any] | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Radarr: /movie
+# Radarr: /request type:movie
 # ---------------------------------------------------------------------------
 
 
@@ -205,7 +207,7 @@ async def _add_movie(
 
 
 # ---------------------------------------------------------------------------
-# Sonarr: /show
+# Sonarr: /request type:show
 # ---------------------------------------------------------------------------
 
 
@@ -290,7 +292,7 @@ class _ConfirmAddShowView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.response.is_done():
             return
-        # Re-checked HERE, not assumed from the /show press that led to
+        # Re-checked HERE, not assumed from the /request press that led to
         # this message -- same reasoning as _ConfirmGrabView.confirm: a role
         # can be revoked during the up-to-15-minute window this view stays
         # alive.
@@ -368,7 +370,7 @@ async def _request_show(
     episode_threshold: int,
     guard: Callable[[discord.Interaction], Awaitable[bool]],
 ) -> None:
-    """Entry point for `/show`'s Request button: gate big shows behind a
+    """Entry point for a show result's Request button: gate big shows behind a
     confirmation, add everything else directly."""
     if interaction.response.is_done():
         return
@@ -394,7 +396,7 @@ async def _request_show(
 
 
 # ---------------------------------------------------------------------------
-# Lidarr: /music (album-level requests)
+# Lidarr: /request type:music (album-level requests)
 # ---------------------------------------------------------------------------
 
 
@@ -533,7 +535,7 @@ async def _add_album(
         if not artist_id:
             await interaction.followup.send(
                 f"Added the artist for **{title}**, but Lidarr didn't report its new ID. "
-                "Try `/music` again in a minute to request the album.",
+                "Try `/request type:music` again in a minute to request the album.",
                 ephemeral=True,
             )
             return
@@ -543,8 +545,8 @@ async def _add_album(
         if artist_was_added:
             message = (
                 f"Added **{artist_name}** to Lidarr, but **{title}** hasn't shown up in its catalog "
-                "yet -- Lidarr refreshes a new artist's albums in the background. Try `/music` again "
-                "in a minute to request it."
+                "yet -- Lidarr refreshes a new artist's albums in the background. Try "
+                "`/request type:music` again in a minute to request it."
             )
         else:
             # The artist was already there, so waiting will not change this:
@@ -569,7 +571,7 @@ async def _add_album(
 
 
 # ---------------------------------------------------------------------------
-# Request button row -- shared by /movie, /show and /music.
+# Request button row -- shared by movie, show and music results.
 # ---------------------------------------------------------------------------
 
 
@@ -578,7 +580,7 @@ class _RequestView(_PagedView):
     shape as discord_bot.py's ReleaseView/EbookView/CancelView (see
     `_resolve_page_item`'s docstring for the bug this guards against: a
     button must resolve against the CURRENT page, not an index frozen when
-    the view was built), generalized across /movie, /show and /music rather
+    the view was built), generalized across movies, shows and music rather
     than copied three times, since the paging and dead-slot logic is
     identical for all three -- only the state check and the add action
     differ, and those are already separate functions above.
@@ -647,7 +649,7 @@ class _RequestView(_PagedView):
 # Root folder / quality profile / metadata profile resolution.
 #
 # "Fetch and cache these at startup or on first use" (see the PR
-# description) means resolved lazily, on the first /movie, /show or /music
+# description) means resolved lazily, on the first movie, show or music request
 # use per service, and kept for the life of the process -- these almost
 # never change, and re-fetching them on every command would be a wasted
 # round trip against household infrastructure for something static.
@@ -749,7 +751,7 @@ class _ServiceSetup:
     would be a wasted call against household infrastructure for nothing.
 
     The lock makes concurrent callers share one resolution rather than each
-    firing their own: two people pressing /movie moments apart, before the
+    firing their own: two people requesting movies moments apart, before the
     cache is warm, must not both hit Radarr's rootfolder/qualityprofile/
     movie endpoints.
 
@@ -877,12 +879,20 @@ def install_media_commands(
     settings: Settings,
     allowed_roles: set[int],
     *,
+    book_request: BookRequest | None = None,
     limiter: AddRateLimiter | None = None,
     radarr_client: RadarrClient | None = None,
     sonarr_client: SonarrClient | None = None,
     lidarr_client: LidarrClient | None = None,
 ) -> None:
-    """Add `/movie`, `/show`, `/music` and `/queue` to `bot`'s command tree.
+    """Add `/request` and `/queue` to `bot`'s command tree.
+
+    `/request` is the ONE way to ask for something new, whatever it is: its
+    type picker offers Movie, Show and Music (Radarr, Sonarr, Lidarr, here),
+    plus Audiobook and Ebook when `book_request` -- the book half, from
+    discord_bot.install_commands -- is given. There used to be a separate
+    `/movie`, `/show` and `/music` beside a books-only `/request`, which left
+    a household of two remembering four commands for one idea.
 
     `radarr_client`/`sonarr_client`/`lidarr_client` are normally built here
     from `settings`, but can be injected -- the same escape hatch
@@ -924,9 +934,8 @@ def install_media_commands(
         else None
     )
 
-    @bot.tree.command(name="movie", description="Search Radarr for a movie, or request one")
-    @app_commands.describe(query="Title to search for")
-    async def movie(interaction: discord.Interaction, query: str) -> None:
+    async def request_movie(interaction: discord.Interaction, query: str) -> None:
+        """`/request type:movie`: search Radarr for a movie, or request one."""
         if not await guard(interaction):
             return
         if radarr_client is None or radarr_setup is None:
@@ -963,9 +972,8 @@ def install_media_commands(
         sent = await interaction.followup.send(embed=view.render_embed(), view=view, ephemeral=True)
         view.message = sent
 
-    @bot.tree.command(name="show", description="Search Sonarr for a TV show, or request one")
-    @app_commands.describe(query="Title to search for")
-    async def show(interaction: discord.Interaction, query: str) -> None:
+    async def request_show(interaction: discord.Interaction, query: str) -> None:
+        """`/request type:show`: search Sonarr for a TV show, or request one."""
         if not await guard(interaction):
             return
         if sonarr_client is None or sonarr_setup is None:
@@ -1010,9 +1018,8 @@ def install_media_commands(
         sent = await interaction.followup.send(embed=view.render_embed(), view=view, ephemeral=True)
         view.message = sent
 
-    @bot.tree.command(name="music", description="Search Lidarr for an album, or request one")
-    @app_commands.describe(query="Album or artist to search for")
-    async def music(interaction: discord.Interaction, query: str) -> None:
+    async def request_music(interaction: discord.Interaction, query: str) -> None:
+        """`/request type:music`: search Lidarr for an album, or request one."""
         if not await guard(interaction):
             return
         if lidarr_client is None or lidarr_setup is None:
@@ -1050,6 +1057,41 @@ def install_media_commands(
         )
         sent = await interaction.followup.send(embed=view.render_embed(), view=view, ephemeral=True)
         view.message = sent
+
+    media_requests = {"movie": request_movie, "show": request_show, "music": request_music}
+    request_choices = [
+        *(
+            [
+                app_commands.Choice(name="Audiobook", value="audiobook"),
+                app_commands.Choice(name="Ebook", value="ebook"),
+            ]
+            if book_request is not None
+            else []
+        ),
+        app_commands.Choice(name="Movie", value="movie"),
+        app_commands.Choice(name="Show", value="show"),
+        app_commands.Choice(name="Music", value="music"),
+    ]
+
+    @bot.tree.command(name="request", description="Find something new to download: a book, movie, show or album")
+    @app_commands.describe(
+        type="What kind of media",
+        query="Title, author, artist, ISBN, or other search text",
+    )
+    @app_commands.choices(type=request_choices)
+    async def request(interaction: discord.Interaction, type: app_commands.Choice[str], query: str) -> None:
+        # No guard here: each branch runs its own as its first step, the
+        # same check either way, so a refusal is worded by the half that
+        # would have done the work.
+        handler = media_requests.get(type.value)
+        if handler is not None:
+            await handler(interaction, query)
+        elif book_request is not None:
+            await book_request(interaction, type, query)
+        else:
+            # Unreachable from Discord, which only sends a listed choice, and
+            # the book choices are listed only when there is a book half.
+            await interaction.response.send_message("That kind of request isn't set up here.", ephemeral=True)
 
     @bot.tree.command(name="queue", description="Show what Radarr, Sonarr and Lidarr are downloading right now")
     async def queue_cmd(interaction: discord.Interaction) -> None:

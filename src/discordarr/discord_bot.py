@@ -1200,13 +1200,26 @@ def is_permitted(member_role_ids: Iterable[int], allowed_roles: Collection[int])
     return bool(set(member_role_ids) & set(allowed_roles))
 
 
+# What `install_commands` hands back instead of registering `/request` itself:
+# the book half of discordarr's one `/request` command, which media_bot.py
+# registers with every media type on it (see `install_media_commands`).
+BookRequest = Callable[[discord.Interaction, app_commands.Choice[str], str], Awaitable[None]]
+
+
 def install_commands(
     bot: commands.Bot,
     api: ShelfmarkApi,
     allowed_roles: set[int],
     max_attachment_bytes: int = int(DEFAULT_MAX_ATTACHMENT_MB * 1_000_000),
     large_release_threshold_bytes: int = int(Settings().discord_large_release_threshold_mb * 1_000_000),
-) -> None:
+) -> BookRequest:
+    """Install the book commands, and return the book half of `/request`.
+
+    `/request` is not registered here: it is ONE command for every kind of
+    media, so it has to live where the movie, show and music handlers are
+    too (media_bot.py). This returns the audiobook/ebook branch for it to
+    call, guard and all.
+    """
     def permitted(interaction: discord.Interaction) -> bool:
         member = interaction.user if isinstance(interaction.user, discord.Member) else None
         if member is None:
@@ -1228,10 +1241,12 @@ def install_commands(
         await interaction.response.send_message(message, ephemeral=True)
         return False
 
-    # Both commands below take a TYPE CHOICE, not free text, so Discord
-    # renders a picker (Audiobook / Ebook) instead of asking a non-technical
-    # user to type tracker jargon like "release" or know that audiobooks and
-    # ebooks live in different places on the server.
+    # `/library` below, and the book half of `/request`, take a TYPE CHOICE,
+    # not free text, so Discord renders a picker (Audiobook / Ebook) instead
+    # of asking a non-technical user to type tracker jargon like "release" or
+    # know that audiobooks and ebooks live in different places on the server.
+    # (`/request` itself is registered in media_bot.py, where the same picker
+    # also offers Movie, Show and Music -- one request command for everything.)
     #
     # This replaces four commands that used to exist:
     #   /library-search  -> /library type:audiobook  (Audiobookshelf, unchanged)
@@ -1329,10 +1344,10 @@ def install_commands(
         sent = await interaction.followup.send(embed=view.render_embed(), view=view, ephemeral=True)
         view.message = sent
 
-    @bot.tree.command(name="request", description="Search Prowlarr for a new audiobook or ebook to download")
-    @app_commands.describe(type="Audiobook or ebook", query="Title, author, ISBN, or other search text")
-    @app_commands.choices(type=_TYPE_CHOICES)
-    async def request(interaction: discord.Interaction, type: app_commands.Choice[str], query: str) -> None:
+    async def request_books(
+        interaction: discord.Interaction, type: app_commands.Choice[str], query: str
+    ) -> None:
+        """`/request type:audiobook|ebook`: search Prowlarr for a release."""
         if not await guard(interaction):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -1533,6 +1548,9 @@ def install_commands(
                 return
             await interaction.followup.send("The library scan job could not be queued.", ephemeral=True)
 
+    return request_books
+
+
 def blocking_problems() -> list[str]:
     """Configuration without which the bot cannot connect at all.
 
@@ -1549,7 +1567,10 @@ def blocking_problems() -> list[str]:
     return problems
 
 
-def build_bot() -> commands.Bot:
+def build_bot() -> tuple[commands.Bot, BookRequest]:
+    """The bot with the book commands installed, and the book half of
+    `/request` for media_bot.py to register alongside movies, shows and music
+    (see `install_commands`)."""
     token = os.environ.get("DISCORD_BOT_TOKEN")
     if not token:
         raise ValueError("DISCORD_BOT_TOKEN is required")
@@ -1620,31 +1641,12 @@ def build_bot() -> commands.Bot:
         settings = Settings()
     large_release_threshold_bytes = int(settings.discord_large_release_threshold_mb * 1_000_000)
     bot = ShelfmarkBot(command_prefix=commands.when_mentioned, intents=intents)
-    install_commands(
+    request_books = install_commands(
         bot,
         ShelfmarkApi(api_url, api_token),
         allowed_roles,
         max_attachment_bytes,
         large_release_threshold_bytes,
     )
-    return bot
+    return bot, request_books
 
-
-def main() -> None:
-    problems = blocking_problems()
-    if problems:
-        _idle(problems)
-        return
-    token = os.environ["DISCORD_BOT_TOKEN"]
-    try:
-        build_bot().run(token)
-    except discord.LoginFailure:
-        # A WRONG token, as distinct from a missing one. Retrying cannot fix
-        # it, and under `restart: unless-stopped` an exit here would retry it
-        # forever — against Discord's login endpoint, which is a good way to
-        # get the application rate-limited.
-        _idle(["DISCORD_BOT_TOKEN was rejected by Discord — the token is wrong or was reset"])
-
-
-if __name__ == "__main__":
-    main()

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import unittest
+from unittest import mock
 
-from src.discordarr.bot import apply_env_aliases
+from src.discordarr.bot import apply_env_aliases, build_bot
 
 
 class EnvAliasTests(unittest.TestCase):
@@ -55,6 +57,40 @@ class EnvAliasTests(unittest.TestCase):
                 environ = {f"DISCORDARR_{name.removeprefix('SHELFMARK_')}": "value"}
                 apply_env_aliases(environ)
                 self.assertEqual(environ.get(name), "value", f"{name} has no working alias")
+
+
+
+class ComposedBotTests(unittest.IsolatedAsyncioTestCase):
+    """The tree the household actually gets: both halves composed by
+    `build_bot`. Each half's own tests pin its part; this pins the whole,
+    which is what Discord syncs and what a person sees when they type `/`."""
+
+    _ENV = {
+        "DISCORD_BOT_TOKEN": "not-a-real-token",
+        "SHELFMARK_API_TOKEN": "not-a-real-token",
+        "SHELFMARK_DISCORD_ALLOWED_ROLE_IDS": "1",
+    }
+
+    async def test_the_whole_command_set_is_exactly_this(self) -> None:
+        """One /request for everything. /movie, /show and /music were
+        folded into it; the picker says which kind."""
+        with mock.patch.dict(os.environ, self._ENV), mock.patch("builtins.print"):
+            bot = build_bot()
+        names = {command.name for command in bot.tree.get_commands()}
+        self.assertEqual(
+            names, {"library", "request", "downloads", "job", "cancel", "scan", "queue"}
+        )
+
+    async def test_request_offers_every_media_type(self) -> None:
+        with mock.patch.dict(os.environ, self._ENV), mock.patch("builtins.print"):
+            bot = build_bot()
+        [type_option, query_option] = bot.tree.get_command("request").to_dict(bot.tree)["options"]
+        self.assertEqual(
+            [choice["name"] for choice in type_option["choices"]],
+            ["Audiobook", "Ebook", "Movie", "Show", "Music"],
+        )
+        self.assertTrue(type_option["required"])
+        self.assertTrue(query_option["required"])
 
 
 if __name__ == "__main__":

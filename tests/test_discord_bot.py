@@ -592,22 +592,21 @@ class CommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
         install_commands(bot, ShelfmarkApi("http://api.invalid", "token"), {1})
         return bot.tree
 
+    async def test_the_book_half_of_request_is_returned_not_registered(self) -> None:
+        """`/request` is one command for every media type, so it is
+        registered where movies, shows and music are (media_bot.py). What
+        this module owes it is the audiobook/ebook branch, as a callable."""
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        request_books = install_commands(bot, ShelfmarkApi("http://api.invalid", "token"), {1})
+        self.assertTrue(callable(request_books))
+        self.assertIsNone(bot.tree.get_command("request"))
+
     async def test_library_takes_an_optional_query(self) -> None:
         tree = self._tree()
         options = tree.get_command("library").to_dict(tree)["options"]
         self.assertEqual(
             [(o["name"], o.get("required", False)) for o in options],
             [("type", True), ("query", False)],
-        )
-
-    async def test_request_still_requires_a_query(self) -> None:
-        """Nothing to browse at an indexer -- an empty Prowlarr search is
-        not a listing, it is a mistake."""
-        tree = self._tree()
-        options = tree.get_command("request").to_dict(tree)["options"]
-        self.assertEqual(
-            [(o["name"], o.get("required", False)) for o in options],
-            [("type", True), ("query", True)],
         )
 
     async def test_job_takes_an_optional_job_id(self) -> None:
@@ -638,9 +637,11 @@ class CommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
         host through the API."""
         tree = self._tree()
         names = {command.name for command in tree.get_commands()}
+        # `/request` is not missing: media_bot.py registers it, for books as
+        # well as movies, shows and music (see test_bot.py's full tree).
         self.assertEqual(
             names,
-            {"library", "request", "downloads", "job", "cancel", "scan"},
+            {"library", "downloads", "job", "cancel", "scan"},
         )
 
     async def test_no_command_demands_an_id_a_user_cannot_obtain(self) -> None:
