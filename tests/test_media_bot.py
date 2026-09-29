@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from src.discordarr.clients import ServiceError
@@ -863,7 +864,7 @@ class AddAlbumTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# _RequestView (shared by /movie, /show, /music)
+# _RequestView (shared by movie, show and music results)
 # ---------------------------------------------------------------------------
 
 
@@ -1004,28 +1005,61 @@ class BuildGuardTests(unittest.IsolatedAsyncioTestCase):
 
 # ---------------------------------------------------------------------------
 # Command registration + the "unset service replies instead of crashing"
-# mutation-check candidate, at the actual /movie /show /music surface.
+# mutation-check candidate, at the actual /request surface.
 # ---------------------------------------------------------------------------
 
 
-def _bot_with(settings: Settings, roles: set[int] = frozenset({1})) -> commands.Bot:
+def _bot_with(
+    settings: Settings, roles: set[int] = frozenset({1}), *, book_request=None
+) -> commands.Bot:
     bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
-    install_media_commands(bot, settings, set(roles))
+    install_media_commands(bot, settings, set(roles), book_request=book_request)
     return bot
+
+
+async def _request(bot: commands.Bot, interaction, kind: str, query: str = "anything") -> None:
+    """Run `/request type:<kind> query:<query>` the way Discord would call it."""
+    choice = app_commands.Choice(name=kind.title(), value=kind)
+    await bot.tree.get_command("request").callback(interaction, type=choice, query=query)
+
+
+class _RecordingBookRequest:
+    """Stands in for discord_bot's book half, recording what it was given."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, str, str]] = []
+
+    async def __call__(self, interaction, type: app_commands.Choice[str], query: str) -> None:
+        self.calls.append((interaction, type.value, query))
 
 
 class CommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_command_set_is_exactly_this(self) -> None:
+        """One /request for every media type: there is no /movie, /show or
+        /music any more."""
         bot = _bot_with(Settings())
         names = {c.name for c in bot.tree.get_commands()}
-        self.assertEqual(names, {"movie", "show", "music", "queue"})
+        self.assertEqual(names, {"request", "queue"})
 
-    async def test_movie_show_and_music_each_require_a_query(self) -> None:
-        bot = _bot_with(Settings())
-        for name in ("movie", "show", "music"):
-            with self.subTest(command=name):
-                options = bot.tree.get_command(name).to_dict(bot.tree)["options"]
-                self.assertEqual([(o["name"], o["required"]) for o in options], [("query", True)])
+    async def test_request_requires_a_type_and_a_query(self) -> None:
+        """Nothing to browse at an indexer or an *arr lookup -- an empty
+        search is not a listing, it is a mistake."""
+        bot = _bot_with(Settings(), book_request=_RecordingBookRequest())
+        options = bot.tree.get_command("request").to_dict(bot.tree)["options"]
+        self.assertEqual(
+            [(o["name"], o.get("required", False)) for o in options],
+            [("type", True), ("query", True)],
+        )
+
+    async def test_the_type_picker_offers_books_only_when_there_is_a_book_half(self) -> None:
+        for book_request, expected in (
+            (None, ["movie", "show", "music"]),
+            (_RecordingBookRequest(), ["audiobook", "ebook", "movie", "show", "music"]),
+        ):
+            with self.subTest(with_books=book_request is not None):
+                bot = _bot_with(Settings(), book_request=book_request)
+                [type_option, _query] = bot.tree.get_command("request").to_dict(bot.tree)["options"]
+                self.assertEqual([c["value"] for c in type_option["choices"]], expected)
 
     async def test_queue_takes_no_arguments(self) -> None:
         bot = _bot_with(Settings())
@@ -1033,9 +1067,40 @@ class CommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(options, [])
 
     async def test_every_command_serializes(self) -> None:
-        bot = _bot_with(Settings())
-        for command in bot.tree.get_commands():
-            command.to_dict(bot.tree)  # raises if Discord would refuse it
+        for book_request in (None, _RecordingBookRequest()):
+            with self.subTest(with_books=book_request is not None):
+                bot = _bot_with(Settings(), book_request=book_request)
+                for command in bot.tree.get_commands():
+                    command.to_dict(bot.tree)  # raises if Discord would refuse it
+
+
+class RequestRoutingTests(unittest.IsolatedAsyncioTestCase):
+    """/request is one command in front of two halves: books go to the
+    book half discord_bot.py hands over, everything else to Radarr, Sonarr
+    or Lidarr here. A choice routed to the wrong half would search the wrong
+    service for the right title."""
+
+    async def test_an_audiobook_or_ebook_goes_to_the_book_half_with_its_query(self) -> None:
+        for kind in ("audiobook", "ebook"):
+            with self.subTest(kind=kind):
+                books = _RecordingBookRequest()
+                bot = _bot_with(Settings(), book_request=books)
+                interaction = _FakeInteraction()
+                await _request(bot, interaction, kind, "the stand")
+                self.assertEqual(books.calls, [(interaction, kind, "the stand")])
+                # Nothing answered on the book half's behalf.
+                self.assertEqual(interaction.response.messages, [])
+
+    async def test_a_movie_show_or_album_never_reaches_the_book_half(self) -> None:
+        for kind in ("movie", "show", "music"):
+            with self.subTest(kind=kind):
+                books = _RecordingBookRequest()
+                bot = _bot_with(Settings(), book_request=books)  # no *arr configured
+                interaction = _FakeInteraction()
+                await _request(bot, interaction, kind)
+                self.assertEqual(books.calls, [])
+                [(content, _kwargs)] = interaction.response.messages
+                self.assertIn("set up here", content)
 
 
 class UnsetServiceRepliesTests(unittest.IsolatedAsyncioTestCase):
@@ -1046,7 +1111,7 @@ class UnsetServiceRepliesTests(unittest.IsolatedAsyncioTestCase):
     async def test_movie_replies_when_radarr_is_not_configured(self) -> None:
         bot = _bot_with(Settings())  # nothing configured
         interaction = _FakeInteraction()
-        await bot.tree.get_command("movie").callback(interaction, query="anything")
+        await _request(bot, interaction, "movie")
         [(content, kwargs)] = interaction.response.messages
         self.assertIn("aren't set up here", content)
         self.assertTrue(kwargs.get("ephemeral"))
@@ -1054,14 +1119,14 @@ class UnsetServiceRepliesTests(unittest.IsolatedAsyncioTestCase):
     async def test_show_replies_when_sonarr_is_not_configured(self) -> None:
         bot = _bot_with(Settings())
         interaction = _FakeInteraction()
-        await bot.tree.get_command("show").callback(interaction, query="anything")
+        await _request(bot, interaction, "show")
         [(content, _kwargs)] = interaction.response.messages
         self.assertIn("aren't set up here", content)
 
     async def test_music_replies_when_lidarr_is_not_configured(self) -> None:
         bot = _bot_with(Settings())
         interaction = _FakeInteraction()
-        await bot.tree.get_command("music").callback(interaction, query="anything")
+        await _request(bot, interaction, "music")
         [(content, _kwargs)] = interaction.response.messages
         self.assertIn("isn't set up here", content)
 
@@ -1079,7 +1144,7 @@ class UnsetServiceRepliesTests(unittest.IsolatedAsyncioTestCase):
         bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
         install_media_commands(bot, Settings(), {999})  # requires a role this user does not have
         interaction = _FakeInteraction(role_ids=(1,))
-        await bot.tree.get_command("movie").callback(interaction, query="anything")
+        await _request(bot, interaction, "movie")
         [(content, kwargs)] = interaction.response.messages
         self.assertIn("not allowed", content)
         self.assertTrue(kwargs.get("ephemeral"))
@@ -1088,7 +1153,7 @@ class UnsetServiceRepliesTests(unittest.IsolatedAsyncioTestCase):
         bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
         install_media_commands(bot, Settings(), set())  # empty allow-list
         interaction = _FakeInteraction(role_ids=(1,))
-        await bot.tree.get_command("movie").callback(interaction, query="anything")
+        await _request(bot, interaction, "movie")
         [(content, _kwargs)] = interaction.response.messages
         self.assertIn("no allowed roles configured", content)
 

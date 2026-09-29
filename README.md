@@ -16,8 +16,10 @@ deploy this one in its place, pointed at the same `.env`.
 
 Every one of Shelfmark's own commands is ported with identical behaviour
 (see `src/discordarr/discord_bot.py`, carried over from
-[shelfmark#39](https://github.com/nuniesmith/shelfmark/pull/39) unchanged
-except its import paths). Nothing about how books work has changed.
+[shelfmark#39](https://github.com/nuniesmith/shelfmark/pull/39)). The one
+structural change since: its `/request` became the book half of discordarr's
+single `/request`, which is registered in `media_bot.py` with movies, shows
+and music on the same picker. Nothing about how books work has changed.
 
 ## Commands
 
@@ -28,45 +30,57 @@ books or media alike. An empty allow-list means nobody may use the bot --
 that is intentional fail-closed behaviour, not a bug waiting to be
 configured.
 
-### Books (Shelfmark API) -- ported, unchanged
+### Asking for something new: `/request`
+
+One command for every kind of media:
+`/request type:<audiobook|ebook|movie|show|music> query:<text>`. The type is
+a picker, not free text, and what happens next depends on it:
+
+| Type | What it does |
+|---|---|
+| Audiobook, Ebook | Search Prowlarr (through Shelfmark); a Grab button queues the download. A release at or above the large-release threshold asks for confirmation first. |
+| Movie | Search Radarr. Each result shows ✅ (in the library with a file), ⏳ (requested, no file yet -- with live download progress when available), or ➕ (not requested), with a Request button on the ones that are not requested yet. |
+| Show | Same shape, against Sonarr. **A show at or above the configured season/episode threshold (default: more than 5 seasons or 100 episodes) asks for confirmation before requesting all of it** -- a mis-ranked or simply huge show is one press away from every episode of it queuing at once. |
+| Music | Search Lidarr **at the album level** -- this requests one album, never a whole discography. If the artist is not in Lidarr yet, requesting an album adds the artist (with nothing else monitored) and then monitors and searches for just that one album once Lidarr's background refresh has populated it. |
+
+There used to be a separate `/movie`, `/show` and `/music` next to a
+books-only `/request`. They were folded into this one command on 2026-09-29.
+
+### Books (Shelfmark API)
 
 | Command | What it does |
 |---|---|
 | `/library type:<audiobook\|ebook> query:<text>` | Browse (empty query) or search what's already on the server. Ebook results can be sent as a Discord attachment, or a signed download link when the file is over the attachment limit. |
-| `/request type:<audiobook\|ebook> query:<text>` | Search Prowlarr for something new; a Grab button queues the download. A release at or above the large-release threshold asks for confirmation first. |
 | `/downloads` | What Shelfmark's qBittorrent instance is downloading right now. |
 | `/job [job_id]` | Recent jobs, or one by ID. |
 | `/cancel [job_id]` | Stop a queued or running job. |
 | `/scan [force]` | Ask Audiobookshelf to re-scan the library. |
 
-### Movies, shows, and music (Radarr / Sonarr / Lidarr) -- new
+### Movies, shows, and music (Radarr / Sonarr / Lidarr)
 
 | Command | What it does |
 |---|---|
-| `/movie query:<text>` | Search Radarr. Each result shows ✅ (in the library with a file), ⏳ (requested, no file yet -- with live download progress when available), or ➕ (not requested), with a Request button on the ones that are not requested yet. |
-| `/show query:<text>` | Same shape, against Sonarr. **A show at or above the configured season/episode threshold (default: more than 5 seasons or 100 episodes) asks for confirmation before requesting all of it** -- a mis-ranked or simply huge show is one press away from every episode of it queuing at once. |
-| `/music query:<text>` | Search Lidarr **at the album level** -- this requests one album, never a whole discography. If the artist is not in Lidarr yet, requesting an album adds the artist (with nothing else monitored) and then monitors and searches for just that one album once Lidarr's background refresh has populated it. |
 | `/queue` | What Radarr, Sonarr and Lidarr are each downloading right now (title, progress, time left). Books keep their own `/downloads`, above -- Shelfmark's qBittorrent category is not visible to the other three apps. |
 
 Movies, shows and music are each configured independently (see below). A
-service left unconfigured makes its command reply "isn't set up here"
-rather than crashing or disappearing from the slash-command list.
+service left unconfigured makes `/request` reply "isn't set up here" for
+that type, rather than crashing or disappearing from the picker.
 
 ### How a request flows to each service
 
-- **Books**: `/request` &rarr; `POST /api/v1/releases/grab` on the
+- **Books**: `/request type:audiobook|ebook` &rarr; `POST /api/v1/releases/grab` on the
   Shelfmark API, which hands the release to qBittorrent. Unchanged from
   the original bot.
-- **Movies**: `/movie` &rarr; `GET /api/v3/movie/lookup` on Radarr for
+- **Movies**: `/request type:movie` &rarr; `GET /api/v3/movie/lookup` on Radarr for
   search, `POST /api/v3/movie` to request (with `qualityProfileId`,
   `rootFolderPath`, `monitored: true`, `minimumAvailability: "released"`,
   `addOptions: {searchForMovie: true}` merged onto the lookup result).
-- **Shows**: `/show` &rarr; `GET /api/v3/series/lookup` on Sonarr for
+- **Shows**: `/request type:show` &rarr; `GET /api/v3/series/lookup` on Sonarr for
   search, `POST /api/v3/series` to request (`qualityProfileId`,
   `rootFolderPath`, `seasonFolder: true`, `monitored: true`,
   `addOptions: {monitor: "all", searchForMissingEpisodes: true}`; no
   `languageProfileId` -- Sonarr v4 dropped language profiles).
-- **Music**: `/music` &rarr; `GET /api/v1/album/lookup` on Lidarr for
+- **Music**: `/request type:music` &rarr; `GET /api/v1/album/lookup` on Lidarr for
   search. Requesting an album whose artist is not yet in Lidarr first
   does `POST /api/v1/artist` (monitoring nothing yet), polls
   `GET /api/v1/album?artistId=` for the requested album to appear, then
@@ -81,7 +95,7 @@ for this household, so discordarr talks to both apps' own APIs.
 
 ### Rate limiting
 
-Every **add** across `/movie`, `/show` and `/music` shares one
+Every **add** of a movie, show or album through `/request` shares one
 per-Discord-user budget (default 10 per hour, see
 `DISCORDARR_ADD_RATE_LIMIT_MAX`/`_WINDOW_SECONDS`), independent of
 Shelfmark's own request-rate limiting on the API side. A search never
@@ -326,9 +340,9 @@ version:
   that app's library, falling back to its first profile. These are
   fetched once and cached for the life of the process, not re-fetched on
   every command.
-- `SONARR_BIG_SHOW_SEASON_THRESHOLD`/`_EPISODE_THRESHOLD` -- the `/show`
-  confirmation gate's thresholds.
-- `LIDARR_ALBUM_POLL_ATTEMPTS`/`_POLL_SECONDS` -- how long `/music` waits
+- `SONARR_BIG_SHOW_SEASON_THRESHOLD`/`_EPISODE_THRESHOLD` -- the big-show
+  confirmation gate's thresholds (`/request type:show`).
+- `LIDARR_ALBUM_POLL_ATTEMPTS`/`_POLL_SECONDS` -- how long a music request waits
   for a newly-added artist's album to appear before giving up.
 - `DISCORDARR_ADD_RATE_LIMIT_MAX`/`_WINDOW_SECONDS` -- the shared add
   budget described above.
@@ -353,13 +367,13 @@ is written around what is actually there:
   every per-season statistics block) as `0` unconditionally -- checked
   against five real shows with 15-38 seasons each. Only
   `statistics.seasonCount` is populated, so in practice only the season
-  threshold in the `/show` confirmation gate can fire today; the episode
+  threshold in the big-show confirmation gate can fire today; the episode
   threshold is still checked, in case a future Sonarr populates it.
 - Lidarr's `album/lookup` result carries the artist's id at the top level
   (`artistId`) as well as embedded in `artist.id` -- either tells you
   whether the artist already exists -- but has no per-track file-count
   field the way the LOCAL `/api/v1/album?artistId=` listing does, so
-  `/music`'s search results can only say "requested" or "not requested",
+  music search results can only say "requested" or "not requested",
   not "downloaded".
 
 See `src/discordarr/arr_clients.py` and `src/discordarr/media_bot.py` for

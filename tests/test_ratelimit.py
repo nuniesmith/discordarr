@@ -6,7 +6,7 @@ from src.discordarr.ratelimit import AddRateLimiter, rate_limit_message, wait_te
 
 
 class AddRateLimiterTests(unittest.TestCase):
-    """The budget every /movie, /show and /music Request press shares --
+    """The budget every movie, show and music Request press shares --
     see media_bot.py's `_add_movie`/`_add_show`/`_add_album`. A fake clock
     makes the window boundary exact instead of racing a real one.
     """

@@ -87,7 +87,7 @@ class Settings:
     lidarr_metadata_profile: str = "Standard"
     # Adding a new artist populates its albums asynchronously (Lidarr
     # refreshes the discography from its metadata server in the
-    # background) -- these bound how long `/music` waits for the just-added
+    # background) -- these bound how long a music request waits for the just-added
     # album to appear before giving up and saying so. 5 attempts * 2s is
     # long enough for a normal refresh without holding the interaction open
     # for the full 15-minute webhook-token window.
