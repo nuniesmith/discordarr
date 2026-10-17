@@ -1039,7 +1039,7 @@ class CommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
         /music any more."""
         bot = _bot_with(Settings())
         names = {c.name for c in bot.tree.get_commands()}
-        self.assertEqual(names, {"request", "queue"})
+        self.assertEqual(names, {"request", "queue", "cleanup"})
 
     async def test_request_requires_a_type_and_a_query(self) -> None:
         """Nothing to browse at an indexer or an *arr lookup -- an empty

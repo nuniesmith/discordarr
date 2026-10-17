@@ -1093,6 +1093,11 @@ def install_media_commands(
             # the book choices are listed only when there is a book half.
             await interaction.response.send_message("That kind of request isn't set up here.", ephemeral=True)
 
+    # /cleanup lives in its own module; it reuses these clients and the guard.
+    from .cleanup import install_cleanup_command
+
+    install_cleanup_command(bot, settings, guard, radarr_client=radarr_client, sonarr_client=sonarr_client)
+
     @bot.tree.command(name="queue", description="Show what Radarr, Sonarr and Lidarr are downloading right now")
     async def queue_cmd(interaction: discord.Interaction) -> None:
         if not await guard(interaction):
