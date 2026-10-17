@@ -40,6 +40,12 @@ def _int_from_env(name: str, default: int, *, minimum: int = 1) -> int:
         raise ValueError(f"{name} must be a whole number") from exc
 
 
+def _id_set_from_env(name: str) -> frozenset[int]:
+    """Comma-separated Discord ids; anything that is not a number is ignored."""
+    raw = os.environ.get(name, "")
+    return frozenset(int(part) for part in raw.replace(" ", "").split(",") if part.isdigit())
+
+
 def _str_from_env(name: str) -> str | None:
     value = (os.environ.get(name) or "").strip()
     return value or None
@@ -108,6 +114,12 @@ class Settings:
     # three independent *arr instances.
     add_rate_limit_max: int = 10
     add_rate_limit_window_seconds: float = 3600.0
+    # /cleanup (cleanup.py): Emby supplies who watched what; deleting is
+    # limited to these Discord user ids and is off while the set is empty.
+    emby_url: str | None = None
+    emby_api_key: str | None = None
+    purge_user_ids: frozenset[int] = frozenset()
+    cleanup_unwatched_days: int = 365
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -143,7 +155,14 @@ class Settings:
             add_rate_limit_window_seconds=_float_from_env(
                 "DISCORDARR_ADD_RATE_LIMIT_WINDOW_SECONDS", 3600.0
             ),
+            emby_url=_str_from_env("EMBY_URL"),
+            emby_api_key=_str_from_env("EMBY_API_KEY"),
+            purge_user_ids=_id_set_from_env("DISCORDARR_PURGE_USER_IDS"),
+            cleanup_unwatched_days=_int_from_env("DISCORDARR_CLEANUP_UNWATCHED_DAYS", 365),
         )
+
+    def emby_configured(self) -> bool:
+        return bool(self.emby_url and self.emby_api_key)
 
     def radarr_configured(self) -> bool:
         return bool(self.radarr_url and self.radarr_api_key)

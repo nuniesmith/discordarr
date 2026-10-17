@@ -55,6 +55,7 @@ books-only `/request`. They were folded into this one command on 2026-09-29.
 | `/job [job_id]` | Recent jobs, or one by ID. |
 | `/cancel [job_id]` | Stop a queued or running job. |
 | `/retry [job_id]` | Run a failed job again. The failure notice shows the short id; with no id, it offers the failed jobs to pick from. A book's import carries on from the retried step. |
+| `/cleanup type:<movies\|shows>` | List titles added over a year ago that nobody has watched since, biggest first, from Emby's play history. Each has a Delete button, with a confirmation step, that removes it and its files through Radarr or Sonarr, with an import exclusion. Only users in `DISCORDARR_PURGE_USER_IDS` can delete. Needs `EMBY_URL` and `EMBY_API_KEY`. |
 | `/scan [force]` | Ask Audiobookshelf to re-scan the library. |
 
 ### Movies, shows, and music (Radarr / Sonarr / Lidarr)

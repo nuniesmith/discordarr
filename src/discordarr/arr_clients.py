@@ -62,6 +62,9 @@ class ArrClient:
     def _put(self, path: str, json_body: Any) -> Any:
         return self.http.request(f"/api/{self.api_version}/{path}", method="PUT", json_body=json_body)
 
+    def _delete(self, path: str, **params: Any) -> Any:
+        return self.http.request(f"/api/{self.api_version}/{path}", method="DELETE", params=params or None)
+
     def root_folders(self) -> Any:
         return self._get("rootfolder")
 
@@ -92,6 +95,11 @@ class RadarrClient(ArrClient):
     def add_movie(self, payload: dict[str, Any]) -> Any:
         return self._post("movie", payload)
 
+    def delete_movie(self, movie_id: int) -> Any:
+        """Remove a movie WITH its files, and exclude it from import lists so
+        a list sync cannot bring back what `/cleanup` just removed."""
+        return self._delete(f"movie/{int(movie_id)}", deleteFiles="true", addImportExclusion="true")
+
 
 class SonarrClient(ArrClient):
     api_version = "v3"
@@ -108,6 +116,10 @@ class SonarrClient(ArrClient):
 
     def add_series(self, payload: dict[str, Any]) -> Any:
         return self._post("series", payload)
+
+    def delete_series(self, series_id: int) -> Any:
+        """Same as `RadarrClient.delete_movie`, in Sonarr's words."""
+        return self._delete(f"series/{int(series_id)}", deleteFiles="true", addImportListExclusion="true")
 
 
 class LidarrClient(ArrClient):
