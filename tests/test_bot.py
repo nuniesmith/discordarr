@@ -78,7 +78,7 @@ class ComposedBotTests(unittest.IsolatedAsyncioTestCase):
             bot = build_bot()
         names = {command.name for command in bot.tree.get_commands()}
         self.assertEqual(
-            names, {"library", "request", "downloads", "job", "cancel", "scan", "queue"}
+            names, {"library", "request", "downloads", "job", "cancel", "retry", "scan", "queue"}
         )
 
     async def test_request_offers_every_media_type(self) -> None:
