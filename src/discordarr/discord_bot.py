@@ -365,6 +365,72 @@ def _cancellable(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _retryable(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Failed jobs `/retry` may act on, newest first: failed, and not retried yet.
+
+    A retry is a new job whose `retry_of` names the failure, so a failure
+    already retried is recognised from the same list rather than offered
+    and refused with a 409 on press.
+    """
+    listed = [job for job in jobs if isinstance(job, dict)]
+    retried = {str(job.get("retry_of")) for job in listed if job.get("retry_of")}
+    return [
+        job
+        for job in listed
+        if str(job.get("status") or "") == "failed" and str(job.get("id") or "") not in retried
+    ]
+
+
+def _retry_label(job: dict[str, Any]) -> str:
+    kind = str(job.get("kind") or "job")
+    name = str(job.get("name") or "")
+    job_id = str(job.get("id") or "")
+    what = f"**{name[:60]}** · {kind}" if name else f"**{kind}**"
+    return f"{what} — `{job_id[:8]}`"
+
+
+def _retry_conflict_message(body: str, job_id: str) -> str:
+    """A 409 from POST /api/v1/jobs/{id}/retry, in words."""
+    detail: Any = {}
+    try:
+        detail = json.loads(body).get("detail", {})
+    except (ValueError, AttributeError):
+        pass
+    if isinstance(detail, dict) and detail.get("retry_job_id"):
+        retry_id = str(detail["retry_job_id"])
+        return (
+            f"**{job_id[:8]}** was already retried, as `{retry_id[:8]}`. "
+            f"`/job {retry_id}` shows how that went."
+        )
+    reason = detail.get("message") if isinstance(detail, dict) else None
+    return f"**{job_id[:8]}** cannot be retried: {reason or 'it has not failed'}."
+
+
+async def _retry_reply(api: "ShelfmarkApi", job_id: str, actor: str) -> str:
+    """Retry one job and say what happened, for the command and its buttons alike."""
+    try:
+        payload = await api.post(
+            f"/api/v1/jobs/{urllib.parse.quote(job_id, safe='')}/retry",
+            json_body={},
+            actor=actor,
+        )
+    except ServiceError as exc:
+        if exc.status == 429:
+            return _rate_limit_message("retries", exc)
+        if exc.status == 404:
+            return f"No job **{job_id}** on the server."
+        if exc.status == 409:
+            return _retry_conflict_message(exc.message, job_id)
+        return "That job could not be retried."
+    payload = payload if isinstance(payload, dict) else {}
+    new_id = str(payload.get("id") or "")
+    what = f"**{payload['name']}**" if payload.get("name") else f"**{payload.get('kind') or 'the job'}**"
+    return (
+        f"Retrying {what} as job `{new_id[:8]}`. If it is a book, its status message "
+        "in the channel updates as it goes."
+    )
+
+
 def _job_label(job: dict[str, Any]) -> str:
     kind = str(job.get("kind") or "job")
     status = str(job.get("status") or "unknown")
@@ -549,6 +615,75 @@ def _request_query(kind: str, query: str) -> tuple[str, dict[str, Any]]:
     return "/api/v1/releases/search", {"q": query, "media_type": kind, "limit": 50}
 
 
+# What a reply calls each pipeline stage; the same words as shelfmark's
+# status messages, so the two never describe one step differently.
+_STAGE_WORDS = {
+    "transfer_completed": "copying to freddy",
+    "organize_apply": "extracting and filing",
+    "library_scan": "adding it to Audiobookshelf",
+}
+
+# The qBittorrent category shelfmark's importer watches (its
+# SHELFMARK_QBITTORRENT_CATEGORY default). A finished torrent anywhere else
+# never reaches the library on its own.
+_BOOK_CATEGORY = "shelfmark-books"
+
+
+def _duplicate_message(payload: dict[str, Any], name: str) -> str:
+    """A grab that added nothing because qBittorrent already had the torrent.
+
+    This always answered "already on the server", and on 2026-10-17 that was
+    wrong twice: the torrent was the grab's OWN, listed a moment late (fixed
+    in shelfmark#42), and the book was not on the server at all, because its
+    copy to freddy had failed. shelfmark now reports what the existing copy
+    is doing (`progress`, and `import`: how far its import got), and each
+    case gets the answer that says what to do next.
+    """
+    progress = payload.get("progress")
+    imported = payload.get("import") if isinstance(payload.get("import"), dict) else None
+    if isinstance(progress, (int, float)) and progress < 1:
+        return (
+            f"**{name}** is already downloading ({progress:.0%}). It lands in the "
+            "library on its own; `/downloads` shows progress."
+        )
+    if imported:
+        stage = _STAGE_WORDS.get(str(imported.get("stage") or ""), "importing")
+        status = str(imported.get("status") or "")
+        if status == "failed":
+            error = str(imported.get("error") or "an error").splitlines()[0][:200].rstrip(" .")
+            job = str(imported.get("job_id") or "")
+            return (
+                f"**{name}** downloaded, but its import stopped at {stage}: {error}. "
+                f"Once the cause is fixed, `/retry job:{job[:8]}` carries on from there."
+            )
+        if status in ACTIVE_JOB_STATUSES:
+            return (
+                f"**{name}** downloaded and is being imported ({stage}). "
+                "It shows up in the library shortly."
+            )
+        return (
+            f"**{name}** is already on the server, so there is nothing new to fetch. "
+            "Try `/library` to read it."
+        )
+    if progress is None:
+        # A shelfmark from before #42 knows only that qBittorrent has it.
+        return (
+            f"**{name}** is already in qBittorrent, so nothing new was fetched. "
+            "If `/library` does not have it, `/downloads` shows where it is."
+        )
+    category = str(payload.get("category") or "")
+    if category and category != _BOOK_CATEGORY:
+        return (
+            f"**{name}** is already downloaded, but in qBittorrent's `{category}` category, "
+            f"which the importer does not watch. Move it to `{_BOOK_CATEGORY}` in "
+            "qBittorrent and it is imported within a minute."
+        )
+    return (
+        f"**{name}** is already downloaded and waiting to be imported. The importer "
+        "checks every minute, so it should reach the library shortly."
+    )
+
+
 def _grab_outcome_message(payload: dict[str, Any], job_id: str) -> str:
     """What the grab actually did, in a sentence.
 
@@ -565,10 +700,7 @@ def _grab_outcome_message(payload: dict[str, Any], job_id: str) -> str:
     state = str(payload.get("state") or "")
     name = str(payload.get("name") or "that release")
     if state == "duplicate":
-        return (
-            f"**{name}** is already on the server — it was downloaded before, "
-            "so there is nothing new to fetch. Try `/library` to read it."
-        )
+        return _duplicate_message(payload, name)
     if state == "rejected":
         return (
             f"qBittorrent would not accept **{name}**. Nothing is downloading. "
@@ -1179,6 +1311,67 @@ class CancelView(_PagedView):
         return callback
 
 
+class RetryView(_PagedView):
+    """Retry buttons over failed jobs that have not been retried yet.
+
+    The same shape as CancelView, for the same reason: a job id otherwise has
+    to be copied out of a message by hand. The failure notice in the channel
+    shows a short id for `/retry job:`, and this is the way in without one.
+    """
+
+    page_size: int = _PAGE_SIZE
+
+    def __init__(
+        self,
+        api: "ShelfmarkApi",
+        jobs: list[dict[str, Any]],
+        actor: str,
+        guard: Callable[[discord.Interaction], Awaitable[bool]],
+        title: str,
+    ):
+        super().__init__(jobs, title, _retry_label, guard)
+        self.api = api
+        self.jobs = jobs
+        self.actor = actor
+        self._action_buttons: list[discord.ui.Button] = []
+        for local_index in range(self.page_size):
+            button = discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                custom_id=f"shelfmark:job-retry:{local_index}",
+                row=0,
+            )
+            button.callback = self._make_callback(local_index)  # type: ignore[method-assign]
+            self._action_buttons.append(button)
+            self.add_item(button)
+        self._sync_action_buttons()
+
+    def _sync_action_buttons(self) -> None:
+        for local_index, button in enumerate(self._action_buttons):
+            job = _resolve_page_item(self.jobs, self.page, local_index)
+            if job is None:
+                button.label = "—"
+                button.disabled = True
+            else:
+                button.label = f"Retry {self.page * self.page_size + local_index + 1}"
+                button.disabled = False
+
+    def _make_callback(self, local_index: int):
+        async def callback(interaction: discord.Interaction) -> None:
+            if interaction.response.is_done():
+                return
+            if not await self.guard(interaction):
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            job = _resolve_page_item(self.jobs, self.page, local_index)
+            if job is None:
+                await interaction.followup.send("That slot is empty on this page.", ephemeral=True)
+                return
+            reply = await _retry_reply(self.api, str(job.get("id") or ""), self.actor)
+            await interaction.followup.send(reply, ephemeral=True)
+
+        return callback
+
+
 def is_permitted(member_role_ids: Iterable[int], allowed_roles: Collection[int]) -> bool:
     """Decide access from role IDs alone.
 
@@ -1521,6 +1714,37 @@ def install_commands(
         sent = await interaction.followup.send(
             embed=view.render_embed(), view=view, ephemeral=True
         )
+        view.message = sent
+
+    @bot.tree.command(name="retry", description="Run a failed Shelfmark job again")
+    @app_commands.describe(
+        job_id="Job ID from the failure message (8 characters is enough) — leave empty to pick"
+    )
+    async def retry(interaction: discord.Interaction, job_id: str = "") -> None:
+        # Optional for the same reason /cancel's is: an id is copied out of a
+        # message by hand, and the picker is the way in without one.
+        if not await guard(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        actor = _actor(interaction)
+        job_id = job_id.strip()
+        if job_id:
+            await interaction.followup.send(await _retry_reply(api, job_id, actor), ephemeral=True)
+            return
+        try:
+            payload = await api.get("/api/v1/jobs", params={"limit": 50}, actor=actor)
+        except ServiceError as exc:
+            if exc.status == 429:
+                await interaction.followup.send(_rate_limit_message("job checks", exc), ephemeral=True)
+                return
+            await interaction.followup.send("The job list is unavailable.", ephemeral=True)
+            return
+        jobs = _retryable(_result_list(payload))
+        if not jobs:
+            await interaction.followup.send("Nothing has failed recently.", ephemeral=True)
+            return
+        view = RetryView(api, jobs, actor, guard, "Failed jobs you can retry")
+        sent = await interaction.followup.send(embed=view.render_embed(), view=view, ephemeral=True)
         view.message = sent
 
     @bot.tree.command(name="scan", description="Ask Audiobookshelf to re-scan the library")

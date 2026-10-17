@@ -641,7 +641,7 @@ class CommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
         # well as movies, shows and music (see test_bot.py's full tree).
         self.assertEqual(
             names,
-            {"library", "downloads", "job", "cancel", "scan"},
+            {"library", "downloads", "job", "cancel", "retry", "scan"},
         )
 
     async def test_no_command_demands_an_id_a_user_cannot_obtain(self) -> None:
@@ -649,7 +649,7 @@ class CommandRegistrationTests(unittest.IsolatedAsyncioTestCase):
         left is OPTIONAL, with a picker behind it, because an id only ever
         appears in an ephemeral reply the reader has probably dismissed."""
         tree = self._tree()
-        for name in ("job", "cancel"):
+        for name in ("job", "cancel", "retry"):
             with self.subTest(command=name):
                 options = tree.get_command(name).to_dict(tree)["options"]
                 required = [o["name"] for o in options if o.get("required")]
@@ -741,11 +741,59 @@ class GrabOutcomeMessageTests(unittest.TestCase):
 
     def test_a_duplicate_says_you_already_have_it(self) -> None:
         msg = _grab_outcome_message(
-            {"state": "duplicate", "name": "Dune Saga - Frank Herbert Collection"}, "job-1"
+            {
+                "state": "duplicate",
+                "name": "Dune Saga - Frank Herbert Collection",
+                "progress": 1.0,
+                "import": {"stage": "library_scan", "status": "succeeded"},
+            },
+            "job-1",
         )
         self.assertIn("already on the server", msg)
         self.assertIn("Dune Saga", msg)
         self.assertNotIn("Queued", msg)
+
+    def test_a_duplicate_still_downloading_says_how_far(self) -> None:
+        msg = _grab_outcome_message(
+            {"state": "duplicate", "name": "A Book", "progress": 0.43, "torrent_state": "downloading"},
+            "job-1",
+        )
+        self.assertIn("already downloading (43%)", msg)
+        self.assertNotIn("on the server", msg)
+
+    def test_a_duplicate_whose_import_failed_names_the_stage_and_the_fix(self) -> None:
+        """The 2026-10-17 report: downloaded on Sullivan, refused at the copy
+        to freddy, and the reply said it was already on the server."""
+        msg = _grab_outcome_message(
+            {
+                "state": "duplicate",
+                "name": "Other Worlds Than These",
+                "progress": 1.0,
+                "import": {
+                    "stage": "transfer_completed",
+                    "status": "failed",
+                    "job_id": "86434eb4-3ccc-44e4-b566-623bf60dc1b5",
+                    "error": "transfer from Sullivan failed: Permission denied (publickey).",
+                },
+            },
+            "job-1",
+        )
+        self.assertIn("stopped at copying to freddy", msg)
+        self.assertIn("Permission denied (publickey)", msg)
+        self.assertIn("/retry job:86434eb4", msg)
+        self.assertNotIn("on the server", msg)
+
+    def test_a_finished_duplicate_in_another_category_says_how_to_move_it(self) -> None:
+        msg = _grab_outcome_message(
+            {"state": "duplicate", "name": "A Book", "progress": 1.0, "category": "prowlarr"}, "job-1"
+        )
+        self.assertIn("`prowlarr` category", msg)
+        self.assertIn("shelfmark-books", msg)
+
+    def test_a_duplicate_from_an_older_api_does_not_claim_it_is_on_the_server(self) -> None:
+        msg = _grab_outcome_message({"state": "duplicate", "name": "A Book"}, "job-1")
+        self.assertIn("already in qBittorrent", msg)
+        self.assertNotIn("on the server", msg)
 
     def test_a_real_download_says_it_is_downloading(self) -> None:
         msg = _grab_outcome_message({"state": "added", "name": "A New Book"}, "job-1")
@@ -905,3 +953,51 @@ class EbookLinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(api.linked, [])
         self.assertIsNone(content)
         self.assertIsInstance(kwargs.get("file"), discord.File)
+
+
+class RetryTests(unittest.IsolatedAsyncioTestCase):
+    """`/retry`: failed jobs only, never one already retried, and every
+    refusal from the API said in words."""
+
+    def test_only_failed_jobs_not_yet_retried_are_offered(self) -> None:
+        from src.discordarr.discord_bot import _retryable
+
+        jobs = [
+            {"id": "retry-of-a", "status": "queued", "retry_of": "a"},
+            {"id": "a", "status": "failed"},
+            {"id": "b", "status": "failed", "name": "Other Worlds Than These"},
+            {"id": "c", "status": "succeeded"},
+        ]
+        self.assertEqual([job["id"] for job in _retryable(jobs)], ["b"])
+
+    def test_a_label_names_the_book_when_there_is_one(self) -> None:
+        from src.discordarr.discord_bot import _retry_label
+
+        label = _retry_label({"id": "86434eb4-xx", "kind": "transfer_completed", "name": "Other Worlds"})
+        self.assertEqual(label, "**Other Worlds** · transfer_completed — `86434eb4`")
+
+    async def _reply(self, *, result=None, error=None) -> str:
+        from src.discordarr.discord_bot import _retry_reply
+
+        api = mock.Mock()
+        api.post = mock.AsyncMock(return_value=result, side_effect=error)
+        return await _retry_reply(api, "86434eb4", "discord:1:2:3")
+
+    async def test_a_retry_names_the_book_and_the_new_job(self) -> None:
+        reply = await self._reply(result={"id": "405819dc-ce1f", "kind": "transfer_completed", "name": "Other Worlds"})
+        self.assertIn("Retrying **Other Worlds** as job `405819dc`", reply)
+
+    async def test_an_already_retried_job_points_at_its_retry(self) -> None:
+        body = '{"detail": {"message": "already retried as 405819dc-ce1f", "retry_job_id": "405819dc-ce1f"}}'
+        reply = await self._reply(error=ServiceError("shelfmark", body, status=409))
+        self.assertIn("already retried, as `405819dc`", reply)
+        self.assertIn("/job 405819dc-ce1f", reply)
+
+    async def test_a_job_that_did_not_fail_says_why_it_cannot_be_retried(self) -> None:
+        body = '{"detail": {"message": "job is succeeded, and only a failed job can be retried"}}'
+        reply = await self._reply(error=ServiceError("shelfmark", body, status=409))
+        self.assertIn("cannot be retried: job is succeeded", reply)
+
+    async def test_an_unknown_job_is_not_found(self) -> None:
+        reply = await self._reply(error=ServiceError("shelfmark", "not found", status=404))
+        self.assertIn("No job **86434eb4**", reply)
